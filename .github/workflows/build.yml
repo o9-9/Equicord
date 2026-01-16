@@ -1,29 +1,31 @@
-name: Release
+name: Build & Release
 on:
     push:
         branches:
             - main
+        tags:
+            - 'v*'
+    workflow_dispatch: # Allows manual trigger from GitHub UI
 
 env:
     FORCE_COLOR: true
-    GITHUB_TOKEN: ${{ secrets.ETOKEN }}
-    REPO: Equicord/Equibored
-    USERNAME: GitHub-Actions
 
 permissions:
-    contents: write
+    contents: write # Required to create releases and upload assets
 
 jobs:
-    Build:
+    build:
         name: Build Equicord
         runs-on: ubuntu-latest
 
         steps:
-            - uses: actions/checkout@v4
+            - name: Checkout repository
+              uses: actions/checkout@v4
 
-            - uses: pnpm/action-setup@v3
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v3
 
-            - name: Use Node.js 20
+            - name: Setup Node.js 20
               uses: actions/setup-node@v4
               with:
                   node-version: 20
@@ -32,10 +34,10 @@ jobs:
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
 
-            - name: Build web
+            - name: Build web version
               run: pnpm buildWebStandalone
 
-            - name: Build
+            - name: Build desktop version
               run: pnpm buildStandalone
 
             - name: Generate plugin lists
@@ -45,41 +47,89 @@ jobs:
                   pnpm generateVencordPluginJson dist/vencordplugins.json
                   pnpm generateDevsList dist/devs.json
 
-            - name: Collect files to be released
+            - name: Prepare release files
               run: |
                   cd dist
-                  mkdir release
+                  mkdir -p release
+                  
+                  # Copy browser extension files
+                  cp browser/browser.* release/ 2>/dev/null || true
+                  
+                  # Copy userscript
+                  cp Equicord.user.js release/ 2>/dev/null || true
+                  cp Equicord.user.js.LEGAL.txt release/ 2>/dev/null || true
+                  
+                  # Copy plugin JSONs, extension zips, and desktop/vesktop asars
+                  cp *.json release/ 2>/dev/null || true
+                  cp *.zip release/ 2>/dev/null || true
+                  cp *.asar release/ 2>/dev/null || true
+                  
+                  # Copy legacy un-asared desktop files
+                  cp desktop/* release/ 2>/dev/null || true
+                  
+                  # Copy equibop files with capitalized names
+                  if [ -d "equibop" ]; then
+                      for file in equibop/*; do
+                          if [ -f "$file" ]; then
+                              filename=$(basename "$file")
+                              cp "$file" "release/equibop${filename^}" 2>/dev/null || true
+                          fi
+                      done
+                  fi
+                  
+                  # Cleanup
+                  find release -size 0 -delete 2>/dev/null || true
+                  rm -f release/package.json 2>/dev/null || true
+                  rm -f release/*.map 2>/dev/null || true
 
-                  cp browser/browser.* release
-                  cp Equicord.user.{js,js.LEGAL.txt} release
+            - name: Get current date
+              id: date
+              run: echo "date=$(date +'%Y-%m-%d-%H%M')" >> $GITHUB_OUTPUT
 
-                  # copy the plugin data jsons, the extension zips and the desktop/vesktop asars
-                  cp *.{json,zip,asar} release
+            - name: Upload artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: equicord-build-${{ steps.date.outputs.date }}
+                  path: dist/release/*
+                  if-no-files-found: error
 
-                  # legacy un-asared files
-                  cp desktop/* release
-                  for file in equibop/*; do
-                    filename=$(basename "$file")
-                    cp "$file" "release/equibop${filename^}"
-                  done
+            - name: Create/Update Latest Release
+              uses: softprops/action-gh-release@v1
+              if: github.ref == 'refs/heads/main'
+              with:
+                  tag_name: latest
+                  name: Latest Development Build
+                  body: |
+                      🚀 Latest automated build of Equicord
+                      
+                      **Commit:** ${{ github.sha }}
+                      **Date:** ${{ steps.date.outputs.date }}
+                      
+                      ### Installation Files:
+                      - `*.asar` - Desktop client files
+                      - `extension-*.zip` - Browser extensions (Chrome/Firefox)
+                      - `Equicord.user.js` - Userscript for browsers
+                      - `*.json` - Plugin metadata files
+                      
+                      ⚠️ This is a development build. Use at your own risk.
+                  files: dist/release/*
+                  draft: false
+                  prerelease: true
+                  generate_release_notes: true
 
-                  find release -size 0 -delete
-                  rm release/package.json
-                  rm release/*.map
-
-            - name: Upload Equicord Stable
-              run: |
-                  gh release upload latest --clobber dist/release/*
-
-            - name: Upload Plugin JSONs to Equibored repo
-              run: |
-                  git config --global user.name "GitHub-Actions"
-                  git config --global user.email actions@github.com
-                  git clone https://$USERNAME:$GITHUB_TOKEN@github.com/$REPO.git plugins
-                  cd plugins
-
-                  cp ../dist/release/*.json .
-                  git add -A
-
-                  git commit -m "Plugins for https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA"
-                  git push --force https://$USERNAME:$GITHUB_TOKEN@github.com/$REPO.git
+            - name: Create Tagged Release
+              uses: softprops/action-gh-release@v1
+              if: startsWith(github.ref, 'refs/tags/v')
+              with:
+                  name: Release ${{ github.ref_name }}
+                  body: |
+                      🎉 Official release of Equicord ${{ github.ref_name }}
+                      
+                      **Commit:** ${{ github.sha }}
+                      **Date:** ${{ steps.date.outputs.date }}
+                      
+                      See CHANGELOG for details.
+                  files: dist/release/*
+                  draft: false
+                  prerelease: false
+                  generate_release_notes: true
